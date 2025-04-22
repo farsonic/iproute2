@@ -673,6 +673,79 @@ static int brlink_show(int argc, char **argv)
 	return 0;
 }
 
+static int print_isolated_linkinfo(struct nlmsghdr *n, void *arg)
+{
+	struct ifinfomsg *ifi = NLMSG_DATA(n);
+	struct rtattr *tb[IFLA_MAX + 1];
+	struct rtattr *brinfo[IFLA_BRPORT_MAX + 1];
+	const char *ifname = NULL, *brname = "-";
+	char iso_path[256], buf[8];
+	FILE *fp;
+	int is_isolated = -1;  // -1 = unknown, 0 = false, 1 = true
+
+	if (n->nlmsg_type != RTM_NEWLINK)
+		return 0;
+
+	parse_rtattr(tb, IFLA_MAX, IFLA_RTA(ifi),
+	             n->nlmsg_len - NLMSG_LENGTH(sizeof(*ifi)));
+
+	if (tb[IFLA_IFNAME])
+		ifname = RTA_DATA(tb[IFLA_IFNAME]);
+	else
+		return 0;
+
+	if (tb[IFLA_MASTER]) {
+		int master = rta_getattr_u32(tb[IFLA_MASTER]);
+		brname = ll_index_to_name(master);
+	}
+
+	// First try via Netlink: IFLA_PROTINFO -> IFLA_BRPORT_ISOLATED
+	if (tb[IFLA_PROTINFO]) {
+		parse_rtattr_nested(brinfo, IFLA_BRPORT_MAX, tb[IFLA_PROTINFO]);
+
+		if (brinfo[IFLA_BRPORT_ISOLATED]) {
+			is_isolated = rta_getattr_u8(brinfo[IFLA_BRPORT_ISOLATED]);
+		}
+	}
+
+	// Fallback: read from /sys/class/net/<iface>/brport/isolated
+	if (is_isolated == -1 && ifname) {
+		snprintf(iso_path, sizeof(iso_path), "/sys/class/net/%s/brport/isolated", ifname);
+		fp = fopen(iso_path, "r");
+		if (fp) {
+			if (fgets(buf, sizeof(buf), fp))
+				is_isolated = atoi(buf);
+			fclose(fp);
+		}
+	}
+
+	printf("%-12s %-12s %-8s\n", ifname, brname,
+	       is_isolated == 1 ? "true" :
+	       is_isolated == 0 ? "false" : "n/a");
+
+	return 0;
+}
+
+
+
+static int brlink_show_isolated(int argc, char **argv)
+{
+	printf("%-12s %-12s %-8s\n", "Interface", "Bridge", "Isolated");
+
+	if (rtnl_linkdump_req(&rth, PF_BRIDGE) < 0) {
+		perror("Cannot send dump request");
+		exit(1);
+	}
+
+	if (rtnl_dump_filter(&rth, print_isolated_linkinfo, NULL) < 0) {
+		fprintf(stderr, "Dump terminated\n");
+		exit(1);
+	}
+
+	fflush(stdout);
+	return 0;
+}
+
 int do_link(int argc, char **argv)
 {
 	ll_init_map(&rth);
@@ -686,6 +759,8 @@ int do_link(int argc, char **argv)
 		    matches(*argv, "lst") == 0 ||
 		    matches(*argv, "list") == 0)
 			return brlink_show(argc-1, argv+1);
+		if (matches(*argv, "show-isolated") == 0)
+			return brlink_show_isolated(argc-1, argv+1);
 		if (matches(*argv, "help") == 0)
 			usage();
 	} else
